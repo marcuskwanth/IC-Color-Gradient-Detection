@@ -1,27 +1,20 @@
 """
 IC-Project : Color Gradient Detection - PC GUI
-Version 250730.1
+Version 250730.2
 ────────────────────────────────────────────────────────────────────────
 Tested with Python 3.12
-*Before runnnig, please run "pip install opencv-python numpy pandas Pillow rembg onnxruntime openpyxl"
-*8 fixed positions (width, height) for a 4K-res image
-- Box 1 XY coordinates: 1056 1188 - 1205 1377
-- Box 2 XY coordinates: 1280 1188 - 1429 1377
-- Box 3 XY coordinates: 1507 1188 - 1656 1377
-- Box 4 XY coordinates: 1744 1188 - 1893 1377
-- Box 5 XY coordinates: 1981 1188 - 2130 1377
-- Box 6 XY coordinates: 2200 1188 - 2349 1377
-- Box 7 XY coordinates: 2425 1188 - 2574 1377
-- Box 8 XY coordinates: 2645 1188 - 2794 1377
+
+*Before runnnig, please run "pip install opencv-python numpy pandas pillow rembg onnxruntime openpyxl" in your environment
+*Put the images to be processed in the folder "image_to_be_processed"
 
 To-do:
 """
 
 # ──────────────── Libraries Import ───────────────────────────────────
-import os, time, threading, sys
+import time, threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from PIL import Image, ImageTk
+from PIL import Image
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -35,15 +28,26 @@ from rembg import remove
 # ──────────────── Tk root window ─────────────────────────────────────
 root = tk.Tk()
 root.title("IC-Project  ·  Color Gradient Detection")
-root.geometry("1200x800")
+root.geometry("1300x900")
 
 # ──────────────── Global configuration ───────────────────────────────
+"""
+*8 fixed positions (X-coord + Y-coord, topleft + bottomright) for a 4K-res image
+- Box 1 XY coordinates: 1056 1188 - 1205 1377
+- Box 2 XY coordinates: 1280 1188 - 1429 1377
+- Box 3 XY coordinates: 1507 1188 - 1656 1377
+- Box 4 XY coordinates: 1744 1188 - 1893 1377
+- Box 5 XY coordinates: 1981 1188 - 2130 1377
+- Box 6 XY coordinates: 2200 1188 - 2349 1377
+- Box 7 XY coordinates: 2425 1188 - 2574 1377
+- Box 8 XY coordinates: 2645 1188 - 2794 1377
+"""
 SAMPLE_NUM      = 8
 X_POS_TOPL      = [1056, 1280, 1507, 1744, 1981, 2200, 2425, 2645]  # Box 1-8 top-left X coordinate
 X_POS_BOTR      = [1205, 1429, 1656, 1893, 2130, 2349, 2574, 2794]  # Box 1-8 bottom-right X coordinate
 Y_POS_TOPL      = 1188              # Fixed Y coordinates
 Y_POS_BOTR      = 1377
-COLOUR_THRES    = 105.8
+COLOUR_THRES    = 50.0              # Default: 105.8
 INFO_PREFIX     = "*INFO: "         # Shown in console
 ERROR_PREFIX    = "*ERROR: "        # Shown in console
 
@@ -111,25 +115,19 @@ def main_process():
         progress_var.set((idx + 1) / len(image_paths) * 100)
         root.update()
 
-        try:
-            # Process image
-            result = image_process(image_path, cv2, remove)
-            results.append(result)
-            update_results_table(result)
-            update_hsv_visualization(result)
+        # Process image
+        result = image_process(image_path, cv2, remove)
+        results.append(result)
+        update_results_table(result)
+        update_hsv_visualization(result)
 
-            # Delay before next image
-            for i in range(5):
-                if stop_processing:
-                    break
-                status_var.set(f"Processing image {idx+1}/{len(image_paths)}: {image_path.name} - Waiting {5-i}s")
-                time.sleep(1)
-            current_image_idx = idx + 1
-
-        except Exception as e:
-            status_var.set(f"Error whilst processing!")
-            print(f"{ERROR_PREFIX}Error processing {image_path.name}: {str(e)}")
-            continue
+        # Delay before next image
+        for i in range(5):
+            if stop_processing:
+                break
+            status_var.set(f"Processing image {idx+1}/{len(image_paths)}: {image_path.name} - Waiting {5-i}s")
+            time.sleep(1)
+        current_image_idx = idx + 1
         
     # After completing ALL images
     processing = False
@@ -144,7 +142,6 @@ def main_process():
 
 """Parent function for processing ONE image"""
 def image_process(image_path, cv2, remove):
-    print(f"{INFO_PREFIX}FUNCTION: Image process")
     samples = []
     
     # Crop 8 samples from hard-coded positions
@@ -155,7 +152,7 @@ def image_process(image_path, cv2, remove):
         result_image = remove_background_and_trim(cropped_image)
         
         # Save the sample
-        sample_path = output_folder / "samples" / f"{image_path.stem}_sample_{i+1}.png"
+        sample_path = output_folder / f"{image_path.stem}_sample_{i+1}.png"
         Image.fromarray(result_image).save(sample_path)
 
         # Calculate HSV values
@@ -170,8 +167,6 @@ def image_process(image_path, cv2, remove):
 
 """Parent function of removing background and trim the edge of ONE sample"""
 def remove_background_and_trim(image):
-    print(f"{INFO_PREFIX}FUNCTION: Remove background and crop")
-    
     # Background removal
     img_rgba = remove(image)
     rgba_arr = np.array(img_rgba)
@@ -210,19 +205,19 @@ def remove_background_and_trim(image):
 
 """Applying erode mask after removing the image's background"""
 def erode_mask(alpha):
-    print(f"{INFO_PREFIX}FUNCTION: Erode mask")
-    
     mask = (alpha > 0).astype(np.uint8) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     eroded = cv2.erode(mask, kernel, iterations=erode_var.get())
     return eroded > 0
 
 # ──────────────── HSV Analysis ──────────────────────────────────────
+"""Decision making based on average HSV"""
+def color_decision(value):
+    return "RED" if value < COLOUR_THRES else "PURPLE"
+
 """Calculating HSV values of individual pixels of a processed image"""
 def calculate_hsv_stats(rgba_arr, cv2):
-    print(f"{INFO_PREFIX}FUNCTION: Calculate HSV Stats")
-    
-    mask = rgba_arr[:, :, 3] > 0        # Create mask of non-transparent pixels
+    mask = rgba_arr[:, :, 3] > 0        # Create mask of all non-transparent pixels
     
     # Converting to HSV spec
     bgr = cv2.cvtColor(rgba_arr, cv2.COLOR_RGBA2BGR)
@@ -231,6 +226,7 @@ def calculate_hsv_stats(rgba_arr, cv2):
 
     if np.any(mask):
         return {
+            "result": color_decision(h[mask].mean()),
             "h_avg": h[mask].mean(),
             "h_min": h[mask].min(),
             "h_max": h[mask].max(),
@@ -243,6 +239,7 @@ def calculate_hsv_stats(rgba_arr, cv2):
         }
     else:
         return {
+            "result": "NONE",
             "h_avg": 0, "h_min": 0, "h_max": 0,
             "s_avg": 0, "s_min": 0, "s_max": 0,
             "v_avg": 0, "v_min": 0, "v_max": 0
@@ -250,8 +247,6 @@ def calculate_hsv_stats(rgba_arr, cv2):
 
 """Updating the GUI result table"""
 def update_results_table(result):
-    print(f"{INFO_PREFIX}FUNCTION: Updating result table")
-    
     # Clear existing data
     for item in result_tree.get_children():
         result_tree.delete(item)
@@ -263,6 +258,7 @@ def update_results_table(result):
             tk.END,
             values=(
                 i + 1,
+                sample['result'],
                 f"{sample['h_avg']:.1f}",
                 sample["h_min"],
                 sample["h_max"],
@@ -272,25 +268,24 @@ def update_results_table(result):
                 f"{sample['v_avg']:.1f}",
                 sample["v_min"],
                 sample["v_max"]
-            )
+            ),
+            tags=('red_row' if sample['result'] == "RED" else 'pur_row')
         )
 
 """Updating the GUI table visualization with plt"""
 def update_hsv_visualization(result):
-    print(f"{INFO_PREFIX}FUNCTION: Updating HSV visualization")
-    
     ax.clear()
 
     # Prepare data
-    sample_nums = range(1, 9)
+    sample_nums = range(1, SAMPLE_NUM + 1)
     h_avgs = [s["h_avg"] for s in result["samples"]]
     s_avgs = [s["s_avg"] for s in result["samples"]]
     v_avgs = [s["v_avg"] for s in result["samples"]]
 
     # Plot HSV averages
-    ax.plot(sample_nums, h_avgs, "o-", label="Hue", color="red")
-    ax.plot(sample_nums, s_avgs, "o-", label="Saturation", color="green")
-    ax.plot(sample_nums, v_avgs, "o-", label="Value", color="blue")
+    ax.plot(sample_nums, h_avgs, "o-", label="Hue", color="#3BCF00")
+    ax.plot(sample_nums, s_avgs, "o:", label="Saturation", color="#A1A1A1")
+    ax.plot(sample_nums, v_avgs, "o:", label="Value", color="#949494")
 
     # Format plot
     ax.set_title("HSV Values by Sample")
@@ -315,16 +310,17 @@ def export_results():
                 {
                     "original_image": Path(result["original_path"]).name,
                     "sample_number": i + 1,
-                    "h_avg": sample["h_avg"],
-                    "h_min": sample["h_min"],
-                    "h_max": sample["h_max"],
-                    "s_avg": sample["s_avg"],
-                    "s_min": sample["s_min"],
-                    "s_max": sample["s_max"],
-                    "v_avg": sample["v_avg"],
-                    "v_min": sample["v_min"],
-                    "v_max": sample["v_max"],
-                    "sample_path": sample["image_path"],
+                    "result": sample['result'],
+                    "h_avg": sample['h_avg'],
+                    "h_min": sample['h_min'],
+                    "h_max": sample['h_max'],
+                    "s_avg": sample['s_avg'],
+                    "s_min": sample['s_min'],
+                    "s_max": sample['s_max'],
+                    "v_avg": sample['v_avg'],
+                    "v_min": sample['v_min'],
+                    "v_max": sample['v_max'],
+                    "sample_path": sample['image_path']
                 }
             )
     df = pd.DataFrame(data)
@@ -388,14 +384,14 @@ progress_bar.pack(side=tk.BOTTOM, fill=tk.X, expand=True, padx=5, pady=5)
 
 result_frame = ttk.LabelFrame(main_frame, text="HSV Results")
 result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-columns = ("Sample", "H Avg", "H Min", "H Max", "S Avg", "S Min", "S Max", "V Avg", "V Min", "V Max",)
-    
+columns = ("Sample", "Result", "H_avg", "H_min", "H_max", "S_avg", "S_min", "S_max", "V_vg", "V_min", "V_max",)
 result_tree = ttk.Treeview(result_frame, columns=columns, show="headings")
 for col in columns:
     result_tree.heading(col, text=col)
     result_tree.column(col, width=80, anchor=tk.CENTER)
-
 result_tree.column("Sample", width=60)
+result_tree.tag_configure('red_row', background="#FFB4B4")
+result_tree.tag_configure('pur_row', background="#E8AEFF")
 scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=result_tree.yview)
 result_tree.configure(yscroll=scrollbar.set)
 result_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -409,10 +405,10 @@ canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
 # Create output folders after GUI starts
 output_folder.mkdir(exist_ok=True, parents=True)
-(output_folder / "samples").mkdir(exist_ok=True, parents=True)
 
 # ──────────────── GUI window ────────────────────────────────────────
 def on_closing():
+    global stop_processing
     stop_processing = True
     root.destroy()
     plt.close("all")  # Clean up matplotlib
