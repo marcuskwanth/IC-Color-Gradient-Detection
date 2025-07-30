@@ -1,17 +1,24 @@
 """
 IC-Project : Color Gradient Detection - PC GUI
-Version 250729.1
+Version 250730.1
 ────────────────────────────────────────────────────────────────────────
 Tested with Python 3.12
+*Before runnnig, please run "pip install opencv-python numpy pandas Pillow rembg onnxruntime openpyxl"
+*8 fixed positions (width, height) for a 4K-res image
+- Box 1 XY coordinates: 1056 1188 - 1205 1377
+- Box 2 XY coordinates: 1280 1188 - 1429 1377
+- Box 3 XY coordinates: 1507 1188 - 1656 1377
+- Box 4 XY coordinates: 1744 1188 - 1893 1377
+- Box 5 XY coordinates: 1981 1188 - 2130 1377
+- Box 6 XY coordinates: 2200 1188 - 2349 1377
+- Box 7 XY coordinates: 2425 1188 - 2574 1377
+- Box 8 XY coordinates: 2645 1188 - 2794 1377
 
 To-do:
-1. Add 8 fixed positions (width, height)
 """
 
 # ──────────────── Libraries Import ───────────────────────────────────
-import os
-import time
-import threading
+import os, time, threading, sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
@@ -31,12 +38,18 @@ root.title("IC-Project  ·  Color Gradient Detection")
 root.geometry("1200x800")
 
 # ──────────────── Global configuration ───────────────────────────────
+SAMPLE_NUM      = 8
+X_POS_TOPL      = [1056, 1280, 1507, 1744, 1981, 2200, 2425, 2645]  # Box 1-8 top-left X coordinate
+X_POS_BOTR      = [1205, 1429, 1656, 1893, 2130, 2349, 2574, 2794]  # Box 1-8 bottom-right X coordinate
+Y_POS_TOPL      = 1188              # Fixed Y coordinates
+Y_POS_BOTR      = 1377
+COLOUR_THRES    = 105.8
 INFO_PREFIX     = "*INFO: "         # Shown in console
 ERROR_PREFIX    = "*ERROR: "        # Shown in console
 
 # ──────────────── Program variables ──────────────────────────────────
-erode_pixels        = 20                                # Tunable
-padding_ratio       = 0.05                              # Tunable
+erode_pixels        = 20                                # Tunable in GUI
+padding_ratio       = 0.05                              # Tunable in GUI
 input_folder        = Path("image_to_be_processed")   
 output_folder       = Path("image_processed")        
 current_image_idx   = 0
@@ -117,7 +130,7 @@ def main_process():
             status_var.set(f"Error whilst processing!")
             print(f"{ERROR_PREFIX}Error processing {image_path.name}: {str(e)}")
             continue
-
+        
     # After completing ALL images
     processing = False
     process_btn.config(state=tk.NORMAL)
@@ -132,46 +145,35 @@ def main_process():
 """Parent function for processing ONE image"""
 def image_process(image_path, cv2, remove):
     print(f"{INFO_PREFIX}FUNCTION: Image process")
-    
-    # Remove background and crop
-    cropped_rgba = remove_background_and_crop(image_path)
-
-    # Save combined image
-    combined_path = output_folder / "combined" / f"{image_path.stem}_combined.png"
-    Image.fromarray(cropped_rgba).save(combined_path)
-
-    # Split into 8 horizontal samples
-    height, width = cropped_rgba.shape[:2]
-    segment_width = width // 8
     samples = []
-
-    for i in range(8):
-        left = i * segment_width
-        right = left + segment_width
-        sample_rgba = cropped_rgba[:, left:right]
-
+    
+    # Crop 8 samples from hard-coded positions
+    for i in range(SAMPLE_NUM):
+        image = Image.open(image_path)
+        bounding_box = (X_POS_TOPL[i], Y_POS_TOPL, X_POS_BOTR[i], Y_POS_BOTR)
+        cropped_image = image.crop(bounding_box)
+        result_image = remove_background_and_trim(cropped_image)
+        
         # Save the sample
         sample_path = output_folder / "samples" / f"{image_path.stem}_sample_{i+1}.png"
-        Image.fromarray(sample_rgba).save(sample_path)
+        Image.fromarray(result_image).save(sample_path)
 
         # Calculate HSV values
-        stats = calculate_hsv_stats(sample_rgba, cv2)
+        stats = calculate_hsv_stats(result_image, cv2)
         stats["image_path"] = str(sample_path)
         samples.append(stats)
-
+    
     return {
         "original_path": str(image_path),
-        "combined_path": str(combined_path),
         "samples": samples,
     }
 
-"""Parent function of removing background and cropping sections of ONE image"""
-def remove_background_and_crop(image_path):
+"""Parent function of removing background and trim the edge of ONE sample"""
+def remove_background_and_trim(image):
     print(f"{INFO_PREFIX}FUNCTION: Remove background and crop")
     
     # Background removal
-    img = Image.open(image_path)
-    img_rgba = remove(img)
+    img_rgba = remove(image)
     rgba_arr = np.array(img_rgba)
 
     # Find non-transparent pixels
@@ -408,7 +410,6 @@ canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 # Create output folders after GUI starts
 output_folder.mkdir(exist_ok=True, parents=True)
 (output_folder / "samples").mkdir(exist_ok=True, parents=True)
-(output_folder / "combined").mkdir(exist_ok=True, parents=True)
 
 # ──────────────── GUI window ────────────────────────────────────────
 def on_closing():

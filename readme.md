@@ -1,3 +1,8 @@
+Version 250730.1
+- PC GUI
+    - Added the functionality of separating 8 samples in an image (hard-coded)
+    - Added a 5-second delay between loading each image (just to simulate real-world use)
+
 Version 250729.1
 - PC GUI
-    - Modified the TTL output to be set to HIGH if any LED is on, not 200ms pulse
+    - Initial commit
