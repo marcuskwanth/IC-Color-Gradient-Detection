@@ -1,5 +1,7 @@
 all_colour_samples/
 image_processed/
 image_to_be_saved/
+YOLO-related/
+output/
 processed_images/
 test_programs/
