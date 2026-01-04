@@ -216,6 +216,8 @@ def update_camera_display(frame):
     h, w = frame.shape[:2]
     aspect_ratio = w / h
     display_width = int(display_height * aspect_ratio)
+
+    print(f"Height = {h}, width = {w}")
     
     resized_frame = cv2.resize(frame, (display_width, display_height))
     

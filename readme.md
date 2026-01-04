@@ -1,3 +1,7 @@
+Version 260102.1
+- PC GUI
+    - Forgot what I did since October, but remember need to fix issue after converting this to .exe in Windows computer.
+
 Version 250730.2
 - PC GUI
     - Added decision making on H_avg with COLOUR_THRES (can be set in the code)
