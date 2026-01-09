@@ -1,3 +1,7 @@
+Version 260104.1
+- PC GUI
+    - Added segment everything
+
 Version 260102.1
 - PC GUI
     - Forgot what I did since October, but remember need to fix issue after converting this to .exe in Windows computer.

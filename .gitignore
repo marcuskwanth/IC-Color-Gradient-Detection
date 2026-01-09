@@ -5,3 +5,9 @@ YOLO-related/
 output/
 processed_images/
 test_programs/
+segmentEverything/sam_hq_vit_h.pth
+segmentEverything/crops/
+segmentEverything/masks/
+segmentEverything/WhatsApp.jpeg
+output_folder_2/
+program/sam_vit_b_01ec64.pth
