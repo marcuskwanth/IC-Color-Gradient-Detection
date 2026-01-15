@@ -1,48 +1,42 @@
-# Version 260115.1
+# Version 251002.2 (minimal cropping fix)
 # ──────────────── Libraries Import ───────────────────────────────────
 import time, threading
-from pathlib import Path
-import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-import cv2
 from PIL import Image, ImageTk
 import numpy as np
 import pandas as pd
 import matplotlib
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from pathlib import Path
+import cv2
+
+# --- SAM imports (replaces rembg) ---
 import torch
 from segment_anything import sam_model_registry, SamPredictor
-matplotlib.use("TkAgg")
+
+camera_indices = [0, 1, 2]  # Try these camera indices in order
 
 # ──────────────── Tk root window ─────────────────────────────────────
 root = tk.Tk()
-root.state("normal")
-root.title("IC-Project  ·  Chemical Color Gradient Detection")
+root.state('zoomed')
+root.title("IC-Project  ·  Color Gradient Detection - Camera Mode")
 root.geometry("1400x900")
 
 # ──────────────── Global configuration ───────────────────────────────
 SAMPLE_NUM      = 16    # Total number of samples
-N_COLS          = 8     # Number of columns (tubes) per row
+N_COLS          = 8
 
 # Standardize camera frames to this size before drawing/cropping
 CAM_W, CAM_H = 1280, 720
 
-# Display size
+# Display size (your camera_container is already 800×500)
 DISP_W, DISP_H = 800, 500
 
-# How often to run full processing loop (seconds)
+# How often to run full processing (SAM is heavy)
 PROCESS_INTERVAL_SEC = 5.0
-
-# Hard-coded Y cleanup (post-SAM)
-Y_CUT_ENABLED      = False
-
-# Always remove mask pixels below this fraction of the *crop* height (0..1)
-Y_CUT_FRAC         = 0.9
-
-# If the mask's bottom-most pixel y is beyond this fraction, trigger the "÷2" rule
-Y_TRIGGER_FRAC     = 0
 
 # ──────────────── SAM configuration ─────────────────────────────────
 # Put checkpoint file next to this script (or change the path)
@@ -52,21 +46,18 @@ SAM_DEVICE     = "cpu"    # "cuda" if you have GPU + torch cuda build
 
 sam_predictor = None  # will be initialized once
 
-# Optional: enable negative corner points if you still get "whole ROI" masks.
-USE_NEGATIVE_POINTS = False     # Keep False for minimal changes / notebook-like prompting.
-
-# ──────────────── ROI geometry ─────────────────────────
+# ──────────────── ROI geometry (from .ipynb) ─────────────────────────
 # ---- CALIBRATE THESE ONCE for your camera/layout ----
 x_left_frac  = 0.2
-x_right_frac = 0.8
+x_right_frac = 0.81
 
-y_top_frac = 0.08   # y-position (as fraction of H) near the liquid of the top row
-y_bot_frac = 0.40   # y-position near the liquid of the bottom row
+y_top_frac = 0.07   # y-position (as fraction of H) near the liquid of the top row
+y_bot_frac = 0.38   # y-position near the liquid of the bottom row
 
 # Box size relative to spacing / image size
-box_w_scale = 0.50   # box width = box_w_scale * tube spacing (dx)
-box_up_frac = 0.00   # how far box extends above row y (fraction of H)
-box_dn_frac = 0.04   # how far box extends below row y (fraction of H)
+box_w_scale = 0.55   # box width = box_w_scale * tube spacing (dx)
+box_up_frac = 0.04   # how far box extends above row y (fraction of H)
+box_dn_frac = 0.10   # how far box extends below row y (fraction of H)
 
 
 def tube_centers_and_boxes(H, W):
@@ -116,51 +107,32 @@ def clip_rect(x1, y1, x2, y2, w, h):
     return x1, y1, x2, y2
 
 
-colour_thres    = 105.8             # Default: 105.8
+COLOUR_THRES    = 105.8             # Default: 105.8
 INFO_PREFIX     = "*INFO: "         # Shown in console
 ERROR_PREFIX    = "*ERROR: "        # Shown in console
 
 # ──────────────── Program variables ──────────────────────────────────
 # NOTE: keep name "erode_pixels", but now it truly means pixels (kernel radius)
-erode_pixels        = 0
-padding_ratio       = 0.05
+erode_pixels        = 2          # was 20; 20px erosion is too aggressive for most ROIs
+padding_ratio       = 0.05       # Tunable in GUI
 frame_count         = 0
 processing          = False
 stop_processing     = False
-previewing          = False
-stop_preview_flag   = False
 camera              = None
-preview_camera_obj  = None
-camera_indices      = [0, 1, 2]  # Try these camera indices in order
 results             = []
 
-output_folder = None
-crops_dir = None
-masks_dir = None
+# Create output folders after GUI starts
+output_folder = Path("output_folder_2")
+output_folder.mkdir(exist_ok=True, parents=True)
 
-def folder_creation():
-    global output_folder, crops_dir, masks_dir
-    # Create output folders after GUI starts
-    output_folder = Path("output_folder")
+# NEW: subfolders like the notebook
+crops_dir = output_folder / "crops"
+masks_dir = output_folder / "masks"
+crops_dir.mkdir(exist_ok=True, parents=True)
+masks_dir.mkdir(exist_ok=True, parents=True)
 
-    # Remove the output folders if they exist from previous runs
-    if output_folder.exists():
-        shutil.rmtree(output_folder)
-    output_folder.mkdir(exist_ok=True, parents=True)
-
-    # subfolders
-    crops_dir = output_folder / "crops"
-    crops_dir.mkdir(exist_ok=True, parents=True)
-    masks_dir = output_folder / "masks"
-    masks_dir.mkdir(exist_ok=True, parents=True)
-    '''
-    sample_dir = output_folder / "samples"
-    sample_dir.mkdir(exist_ok=True, parents=True)
-    '''
-
-# processing thread reference (to join on closing)
-processing_thread = None
-preview_thread = None
+# Add a global reference for the processing thread (to join on closing)
+processing_thread = None  # Added global thread reference
 
 
 # ──────────────── SAM init ──────────────────────────────────────────
@@ -201,7 +173,7 @@ def init_sam_predictor():
         return False
 
 
-# ──────────────── Mask utilities ───────────────────────
+# ──────────────── Mask utilities (from .ipynb) ───────────────────────
 def largest_component(mask_bool):
     m = (mask_bool.astype(np.uint8) * 255)
     num, labels = cv2.connectedComponents(m, connectivity=8)
@@ -314,9 +286,9 @@ def boundary_by_air_difference(crop_rgb, core_mask):
 def chemical_from_crop_strict(
     crop_rgb,
     tube_mask_crop,
-    min_area_frac=0.06,     # minimum chemical area as fraction of tube area
-    bottomness_frac=0.50,   # minimum bottomness of chemical cue to be valid
-    keep_core_frac=0.55     # fraction of distance transform to keep as core
+    min_area_frac=0.06,
+    bottomness_frac=0.50,
+    keep_core_frac=0.55
 ):
     H, W = tube_mask_crop.shape
     tube_area = int(tube_mask_crop.sum())
@@ -420,7 +392,7 @@ def mask_to_rgba_and_trim(crop_rgb, mask_bool, erode_px, padding_ratio, trim_mas
 
 def choose_best_sam_mask(masks_full, scores, crop_slice, prefer_not_full=True):
     """
-    Pick a SAM mask that isn't "everything". (Kept for reference; notebook uses argmax(scores).)
+    Pick a SAM mask that isn't "everything".
     crop_slice = (y0,y1,x0,x1)
     """
     y0, y1, x0, x1 = crop_slice
@@ -432,9 +404,11 @@ def choose_best_sam_mask(masks_full, scores, crop_slice, prefer_not_full=True):
         area_frac = float(m_crop.mean()) if m_crop.size else 1.0  # [0..1]
         sc = float(scores[j])
 
+        # penalize huge masks (often "whole ROI")
         penalty = 0.65 * area_frac if prefer_not_full else 0.0
         val = sc - penalty
 
+        # optionally reject near-full masks unless all are bad
         if prefer_not_full and area_frac > 0.98:
             val -= 2.0
 
@@ -443,33 +417,6 @@ def choose_best_sam_mask(masks_full, scores, crop_slice, prefer_not_full=True):
             best_idx = j
 
     return int(best_idx)
-
-
-def hard_y_cleanup(mask_bool, cut_frac=Y_CUT_FRAC, trigger_frac=Y_TRIGGER_FRAC):
-    if not Y_CUT_ENABLED:
-        return mask_bool
-
-    H = mask_bool.shape[0]
-    if H <= 0:
-        return mask_bool
-
-    out = mask_bool.copy()
-    trigger_y = int(trigger_frac * H)
-
-    if mask_bool.any():
-        ymax = int(np.where(mask_bool)[0].max())
-
-        if ymax >= trigger_y:
-            ys = np.where(mask_bool)[0]
-            ymin, ymax = int(ys.min()), int(ys.max())
-            cut_at = ymin + (ymax - ymin) // 2
-            out[:cut_at, :] = False   # keep bottom half of the mask
-
-    cut_y = int(cut_frac * H)
-    cut_y = int(np.clip(cut_y, 0, H))
-    out[cut_y:, :] = False
-
-    return out
 
 
 # ──────────────── Threading Functions ───────────────────────────────
@@ -481,29 +428,23 @@ def start_processing():
         return
 
     camera = None
-    folder_creation()
 
-    try:
-        print("INFO: Trying camera index:", cam_index_var.get())
-        
-        camera = cv2.VideoCapture(cam_index_var.get())
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-        if not camera.isOpened():
-            raise Exception(f"Cannot open camera index {cam_index_var.get()}")
-            
-        ret, test_frame = camera.read()
-        if not ret or test_frame is None:
+    for cam_index in camera_indices:
+        try:
+            camera = cv2.VideoCapture(cam_index)
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+            if camera.isOpened():
+                ret, test_frame = camera.read()
+                if ret and test_frame is not None:
+                    print(f"INFO: Using camera index {cam_index}")
+                    break
             camera.release()
-            raise Exception(f"Cannot read from camera index {cam_index_var.get()}")
-            
-        print(f"INFO: Successfully using camera index {cam_index_var.get()}")
-        
-    except Exception as e:
-        print(f"ERROR: Camera index {cam_index_var.get()} failed: {str(e)}")
-        if camera:
-            camera.release()
-        messagebox.showerror("Camera Error", f"Cannot access camera {cam_index_var.get()}. Please check camera connection.")
+        except Exception as e:
+            print(f"ERROR: Camera index {cam_index} failed: {str(e)}")
+
+    if not camera or not camera.isOpened():
+        messagebox.showerror("Camera Error", "Cannot access any camera. Please check camera connection.")
         return
 
     if processing:
@@ -524,88 +465,11 @@ def start_processing():
 
 def stop_processing_func():
     """Stop the processing schedule upon clicking stop processing button"""
-    global stop_processing
+    global stop_processing, camera
     stop_processing = True
+    if camera:
+        camera.release()
     status_var.set("Stopping the process...")
-
-
-def preview_camera():
-    """Start camera preview as a thread"""
-    global previewing, stop_preview_flag, preview_camera_obj, preview_thread
-    
-    if previewing:
-        return
-    
-    preview_camera_obj = None
-    status_var.set("Starting camera preview...")
-    
-    try:
-        print("INFO: Starting camera preview, index:", cam_index_var.get())
-        
-        preview_camera_obj = cv2.VideoCapture(cam_index_var.get())
-        preview_camera_obj.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-        preview_camera_obj.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-        
-        if not preview_camera_obj.isOpened():
-            raise Exception(f"Cannot open camera index {cam_index_var.get()}")
-            
-        ret, test_frame = preview_camera_obj.read()
-        if not ret or test_frame is None:
-            preview_camera_obj.release()
-            raise Exception(f"Cannot read from camera index {cam_index_var.get()}")
-            
-        print(f"INFO: Preview using camera index {cam_index_var.get()}")
-        
-    except Exception as e:
-        print(f"ERROR: Camera preview failed: {str(e)}")
-        if preview_camera_obj:
-            preview_camera_obj.release()
-        messagebox.showerror("Camera Error", f"Cannot access camera {cam_index_var.get()}. Please check camera connection.")
-        return
-    
-    previewing = True
-    stop_preview_flag = False
-    
-    preview_btn.config(state=tk.DISABLED)
-    stop_preview_btn.config(state=tk.NORMAL)
-    process_btn.config(state=tk.DISABLED)
-    cam_index_menu.config(state=tk.DISABLED)
-
-    status_var.set("Started camera preview")
-    
-    preview_thread = threading.Thread(target=preview_loop)
-    preview_thread.daemon = False
-    preview_thread.start()
-
-
-def stop_preview():
-    """Stop camera preview"""
-    global stop_preview_flag
-    status_var.set("Stopping preview...")
-    stop_preview_flag = True
-
-
-def preview_loop():
-    """Preview loop that shows camera feed with ROI boxes"""
-    global previewing, preview_camera_obj
-    
-    while not stop_preview_flag and preview_camera_obj and preview_camera_obj.isOpened():
-        ret, frame = preview_camera_obj.read()
-        if not ret:
-            break
-        
-        update_camera_display(frame)
-        time.sleep(0.03)
-    
-    if preview_camera_obj:
-        preview_camera_obj.release()
-    
-    previewing = False
-    preview_btn.config(state=tk.NORMAL)
-    stop_preview_btn.config(state=tk.DISABLED)
-    process_btn.config(state=tk.NORMAL)
-    cam_index_menu.config(state="readonly")
-    status_var.set("Preview stopped. Ready to process")
 
 
 # ──────────────── Camera Processing ───────────────────────────────
@@ -617,7 +481,7 @@ def main_process():
     frame_count = 0
     last_process_time = time.time()
 
-    while not stop_processing and camera and camera.isOpened():
+    while not stop_processing and camera.isOpened():
         ret, frame = camera.read()
         if not ret:
             status_var.set("Failed to capture frame from camera")
@@ -628,11 +492,10 @@ def main_process():
 
         current_time = time.time()
         if current_time - last_process_time >= PROCESS_INTERVAL_SEC:
-            status_var.set(f"Processing: Frame {frame_count+1}")
+            status_var.set(f"Processing: Frame {frame_count + 1}")
 
-            # FIX 5: ensure int/float types are correct
-            current_erode = int(float(erode_pixels))
-            current_padding = float(padding_ratio)
+            current_erode = erode_var.get()
+            current_padding = padding_var.get()
 
             result = process_camera_frame(frame, current_erode, current_padding)
             results.append(result)
@@ -664,7 +527,7 @@ def initialize_camera_display():
 
 def process_camera_frame(frame, erode_px, padding_ratio):
     """Process a single camera frame using SAM tube+chemical segmentation."""
-    global sam_predictor, crops_dir, masks_dir, frame_count
+    global sam_predictor
 
     samples = []
 
@@ -676,10 +539,9 @@ def process_camera_frame(frame, erode_px, padding_ratio):
     sam_predictor.set_image(rgb_full)
 
     def handle_idx(center_xy, box_xyxy, tag):
-        global sam_predictor, frame_count, crops_dir, masks_dir
         x0, y0, x1, y1 = box_xyxy.astype(int)
 
-        # clip and reuse this SAME box for crop + SAM
+        # clip and reuse this SAME box for crop + SAM (fix)
         x0, y0, x1, y1 = clip_rect(x0, y0, x1, y1, w, h)
         box_clipped = np.array([x0, y0, x1, y1], dtype=np.float32)
 
@@ -688,22 +550,11 @@ def process_camera_frame(frame, erode_px, padding_ratio):
             return create_dummy_result(tag)
 
         try:
-            # FIX 2: use notebook-style center prompt (near liquid), but clamp into box
-            cx = float(np.clip(center_xy[0], x0 + 1, x1 - 2))
-            cy = float(np.clip(center_xy[1], y0 + 1, y1 - 2))
-
-            if USE_NEGATIVE_POINTS:
-                point_coords = np.array([
-                    [cx, cy],           # positive
-                    [x0 + 2, y0 + 2],    # negatives (corners)
-                    [x1 - 3, y0 + 2],
-                    [x0 + 2, y1 - 3],
-                    [x1 - 3, y1 - 3],
-                ], dtype=np.float32)
-                point_labels = np.array([1, 0, 0, 0, 0], dtype=np.int32)
-            else:
-                point_coords = np.array([[cx, cy]], dtype=np.float32)
-                point_labels = np.array([1], dtype=np.int32)
+            # ensure point is inside the clipped box (more stable than precomputed center)
+            cx = float((x0 + x1) / 2.0)
+            cy = float((y0 + y1) / 2.0)
+            point_coords = np.array([[cx, cy]], dtype=np.float32)
+            point_labels = np.array([1], dtype=np.int32)
 
             masks, scores, _ = sam_predictor.predict(
                 point_coords=point_coords,
@@ -712,18 +563,15 @@ def process_camera_frame(frame, erode_px, padding_ratio):
                 multimask_output=True
             )
 
-            # FIX 3: notebook behavior = choose argmax(scores)
-            kbest = int(np.argmax(scores))
-
+            # choose a mask that isn't "everything"
+            kbest = choose_best_sam_mask(masks, scores, crop_slice=(y0, y1, x0, x1), prefer_not_full=True)
             tube_mask_full = masks[kbest].astype(bool)
-
             tube_mask_crop = tube_mask_full[y0:y1, x0:x1]
+
             tube_mask_crop = largest_component(tube_mask_crop)
-            tube_mask_crop = hard_y_cleanup(tube_mask_crop) # hard-coded cleanup (removes pixels below certain y; triggers ÷2 rule if too low)
 
             # Chemical/liquid region inside tube
             chem_mask = chemical_from_crop_strict(crop_rgb, tube_mask_crop)
-            chem_mask = hard_y_cleanup(chem_mask)  # hard-coded cleanup
 
             dilate_px = max(3, int(0.03 * (x1 - x0)))
             bg, tube_ov, tube_non, chem = split_parts(crop_rgb, tube_mask_crop, chem_mask, dilate_px=dilate_px)
@@ -733,47 +581,43 @@ def process_camera_frame(frame, erode_px, padding_ratio):
             label[tube_ov] = 2
             label[chem] = 3
 
-            # Save masks
-            '''
-            Image.fromarray((tube_mask_crop.astype(np.uint8) * 255)).save(masks_dir / f"{frame_count}_tube_{tag}_tube.png")
-            Image.fromarray((chem.astype(np.uint8) * 255)).save(masks_dir / f"{frame_count}_tube_{tag}_chem.png")
-            Image.fromarray((tube_ov.astype(np.uint8) * 255)).save(masks_dir / f"{frame_count}_tube_{tag}_tube_overlap.png")
-            Image.fromarray((tube_non.astype(np.uint8) * 255)).save(masks_dir / f"{frame_count}_tube_{tag}_tube_nonoverlap.png")
-            Image.fromarray(label).save(masks_dir / f"{frame_count}_tube_{tag}_label.png")
-            Image.fromarray(crop_rgb).save(crops_dir / f"{frame_count}_tube_{tag}_raw.png")
-            '''
+            timestamp = int(time.time())
 
-            # Cropped tube RGBA (trimmed)
+            # Save masks (unchanged)
+            Image.fromarray((tube_mask_crop.astype(np.uint8) * 255)).save(masks_dir / f"tube_{timestamp}_{tag}_tube.png")
+            Image.fromarray((chem.astype(np.uint8) * 255)).save(masks_dir / f"tube_{timestamp}_{tag}_chem.png")
+            Image.fromarray((tube_ov.astype(np.uint8) * 255)).save(masks_dir / f"tube_{timestamp}_{tag}_tube_overlap.png")
+            Image.fromarray((tube_non.astype(np.uint8) * 255)).save(masks_dir / f"tube_{timestamp}_{tag}_tube_nonoverlap.png")
+            Image.fromarray(label).save(masks_dir / f"tube_{timestamp}_{tag}_label.png")
+
+            # --- FIX: crops/tube_*.png should be a real cropped result (trimmed) ---
             tube_rgba_trim = mask_to_rgba_and_trim(
                 crop_rgb=crop_rgb,
                 mask_bool=tube_mask_crop,      # alpha = tube
                 trim_mask_bool=tube_mask_crop, # trim bbox = tube
-                erode_px=0,                    # keep tube edges for bbox
+                erode_px=0,                    # keep tube edges for bbox; avoid eroding bbox away
                 padding_ratio=padding_ratio
             )
-            crop_path = crops_dir / f"{frame_count}_cropped_{tag}.png"
-            Image.fromarray(tube_rgba_trim).save(crop_path)
+            Image.fromarray(tube_rgba_trim).save(crops_dir / f"tube_{timestamp}_{tag}.png")
 
-            stats = calculate_hsv_stats(tube_rgba_trim, cv2)    # Use cropped tube RGBA for HSV stats!
-            stats["image_path"] = str(crop_path)
-
-            # --------------Optional: save sample RGBA trimmed by tube bbox-----------------
-            # Use chemical pixels for HSV if available, else tube
+            # --- HSV image/mask ---
+            # Use chemical pixels for HSV if available, else tube.
             use_mask_for_hsv = chem if chem.sum() > 0 else tube_mask_crop
 
-            # Sample trimmed by tube bbox (alpha can be chem)
+            # --- FIX: camera_sample should be trimmed by tube bbox (even if alpha=chem) ---
             result_rgba = mask_to_rgba_and_trim(
                 crop_rgb=crop_rgb,
                 mask_bool=use_mask_for_hsv,    # alpha = chem (or tube)
-                trim_mask_bool=tube_mask_crop, # trim bbox = tube
+                trim_mask_bool=tube_mask_crop, # trim bbox = tube (this makes it visibly cropped)
                 erode_px=erode_px,
                 padding_ratio=padding_ratio
             )
-            '''
-            Image.fromarray(result_rgba).save(sample_dir / f"{frame_count}_sample_{tag}.png")
-            '''
-            # ------------------------------------------------------------------------------
 
+            sample_path = output_folder / f"camera_sample_{timestamp}_{tag}.png"
+            Image.fromarray(result_rgba).save(sample_path)
+
+            stats = calculate_hsv_stats(result_rgba, cv2)
+            stats["image_path"] = str(sample_path)
             return stats
 
         except Exception as e:
@@ -783,7 +627,7 @@ def process_camera_frame(frame, erode_px, padding_ratio):
     for idx in range(16):
         center = CENTERS_CAM[idx]
         box = BOXES_CAM[idx]
-        tag = f"{idx+1}"
+        tag = f"top_{idx+1}" if idx < 8 else f"bottom_{(idx-8)+1}"
         samples.append(handle_idx(center, box, tag))
 
     return {
@@ -830,7 +674,7 @@ def update_camera_display(frame):
 
 # ──────────────── HSV Analysis ──────────────────────────────────────
 def color_decision(value):
-    return "RED" if value < colour_thres_var.get() else "PURPLE"
+    return "RED" if value < COLOUR_THRES else "PURPLE"
 
 
 def calculate_hsv_stats(rgba_arr, cv2):
@@ -900,7 +744,7 @@ def update_hsv_visualization(result):
     ax.plot(sample_nums, s_avgs, "o:", label="Saturation", color="#A1A1A1")
     ax.plot(sample_nums, v_avgs, "o:", label="Value", color="#949494")
 
-    ax.set_title(f"HSV Values of {SAMPLE_NUM} Samples (Current: Frame {frame_count+1})")
+    ax.set_title(f"HSV Values of {SAMPLE_NUM} Samples (Current: Frame {frame_count})")
     ax.set_xlabel("Sample Number")
     ax.set_ylabel("Value")
     ax.set_xticks(range(1, SAMPLE_NUM + 1))
@@ -949,8 +793,7 @@ def export_results():
 
 # ──────────────── GUI Variables ──────────────────────────────────────
 global orig_label, proc_label, status_var, progress_var, process_btn, stop_btn
-global export_btn, result_tree, camera_label
-global preview_btn, stop_preview_btn
+global export_btn, result_tree, camera_label, erode_var, padding_var
 
 # ──────────────── GUI layout ────────────────────────────────────────
 main_frame = ttk.Frame(root)
@@ -960,7 +803,7 @@ top_frame = ttk.Frame(main_frame)
 top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False)
 
 left_frame = ttk.Frame(top_frame)
-left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=0, pady=5)
+left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=5, pady=5)
 
 left_top_frame = ttk.Frame(left_frame)
 left_top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False)
@@ -968,21 +811,37 @@ left_bot_frame = ttk.Frame(left_frame)
 left_bot_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=False)
 
 right_frame = ttk.Frame(top_frame)
-right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=0, pady=5)
-
-right_top_frame = ttk.Frame(right_frame)
-right_top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=0, pady=0)
-right_bot_frame = ttk.Frame(right_frame)
-right_bot_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=0, pady=0)
+right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
 bottom_frame = ttk.Frame(main_frame)
 bottom_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=False)
 
 # ──────────────── LEFT FRAME: Controls and Results ──────────────────
-
-# ═════════════════ TOP LEFT FRAME: Controls ═══════════════════════
 control_frame = ttk.LabelFrame(left_top_frame, text="Controls")
 control_frame.pack(fill=tk.X, padx=5, pady=(0, 10))
+
+params_frame = ttk.Frame(control_frame)
+params_frame.pack(fill=tk.X, padx=5, pady=5)
+
+erode_frame = ttk.Frame(params_frame)
+erode_frame.pack(fill=tk.X, pady=2)
+ttk.Label(erode_frame, text="Erode Pixels:").pack(side=tk.LEFT, padx=5)
+erode_var = tk.IntVar(value=erode_pixels)
+ttk.Scale(erode_frame, from_=0, to=50, variable=erode_var,
+          command=lambda v: erode_label.config(text=f"{int(float(v))} px"),
+          orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+erode_label = ttk.Label(erode_frame, text=f"{erode_pixels} px")
+erode_label.pack(side=tk.LEFT, padx=5)
+
+padding_frame = ttk.Frame(params_frame)
+padding_frame.pack(fill=tk.X, pady=2)
+ttk.Label(padding_frame, text="Padding Ratio:").pack(side=tk.LEFT, padx=5)
+padding_var = tk.DoubleVar(value=padding_ratio)
+ttk.Scale(padding_frame, from_=0, to=0.2, variable=padding_var,
+          command=lambda v: padding_label.config(text=f"{float(v):.2f}"),
+          orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+padding_label = ttk.Label(padding_frame, text=f"{padding_ratio:.2f}")
+padding_label.pack(side=tk.LEFT, padx=5)
 
 btn_frame = ttk.Frame(control_frame)
 btn_frame.pack(fill=tk.X, padx=5, pady=10)
@@ -996,14 +855,13 @@ stop_btn.pack(side=tk.LEFT, padx=5)
 export_btn = ttk.Button(btn_frame, text="Export", command=export_results, state=tk.DISABLED)
 export_btn.pack(side=tk.LEFT, padx=5)
 
-status_var = tk.StringVar(value="Ready to process")
+status_var = tk.StringVar(value="Ready to process camera")
 status_label = ttk.Label(btn_frame, textvariable=status_var)
 status_label.pack(side=tk.LEFT, padx=5)
 
-# ═══════════════ BOTTOM LEFT FRAME: HSV Visualization and Results ═══════════════════════
 vis_frame = ttk.LabelFrame(left_bot_frame, text="HSV Visualization Chart")
 vis_frame.pack(fill=tk.BOTH, expand=False, padx=5, pady=5)
-fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+fig, ax = plt.subplots(figsize=(7, 4))
 canvas = FigureCanvasTkAgg(fig, master=vis_frame)
 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=False)
 
@@ -1038,49 +896,11 @@ result_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
 # ──────────────── RIGHT FRAME: Camera Feed ──────────────────────────
-threshold_frame = ttk.LabelFrame(right_top_frame, text="H_avg Threshold (RED / PURPLE)")
-threshold_frame.pack(side=tk.LEFT, fill=tk.X, padx=5, pady=(0, 10), expand=True)
+camera_frame = ttk.LabelFrame(right_frame, text="Camera Output")
+camera_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-# Set the colour threshold scale and label
-thres_inner_frame = ttk.Frame(threshold_frame)
-thres_inner_frame.pack(fill=tk.X, padx=5, pady=5)
-
-colour_thres_var = tk.DoubleVar(value=colour_thres)
-ttk.Scale(thres_inner_frame, from_=0, to=180, variable=colour_thres_var,
-          command=lambda v: colour_thres_label.config(text=f"{float(v):.1f}"),
-          orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-colour_thres_label = ttk.Label(thres_inner_frame, text=f"{colour_thres:.1f}")
-colour_thres_label.pack(side=tk.LEFT, padx=5)
-
-# ---
-cam_menu_frame = ttk.LabelFrame(right_top_frame, text="Camera Selection")
-cam_menu_frame.pack(side=tk.RIGHT, fill=tk.X, padx=5, pady=(0, 10), expand=True)
-
-cam_controls_frame = ttk.Frame(cam_menu_frame)
-cam_controls_frame.pack(padx=5, pady=5)
-
-cam_index_var = tk.IntVar(value=camera_indices[0] if camera_indices else 0)
-cam_index_menu = ttk.Combobox(
-    cam_controls_frame,
-    textvariable=cam_index_var,
-    values=camera_indices,
-    state="readonly",
-    width=10
-)
-cam_index_menu.pack(side=tk.LEFT, padx=5)
-
-preview_btn = ttk.Button(cam_controls_frame, text="Start Preview", command=preview_camera)
-preview_btn.pack(side=tk.LEFT, padx=5)
-
-stop_preview_btn = ttk.Button(cam_controls_frame, text="Stop Preview", command=stop_preview, state=tk.DISABLED)
-stop_preview_btn.pack(side=tk.LEFT, padx=5)
-
-# ---
-camera_frame = ttk.LabelFrame(right_bot_frame, text="Camera Output")
-camera_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, padx=5, pady=(0, 10), expand=True)
-
-camera_container = tk.Frame(camera_frame, width=600, height=400, bg="black")
-camera_container.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+camera_container = tk.Frame(camera_frame, width=800, height=500, bg="black")
+camera_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 camera_container.pack_propagate(False)
 
 camera_label = ttk.Label(camera_container, background="black")
@@ -1089,9 +909,8 @@ camera_label.pack(fill=tk.BOTH, expand=True)
 # ──────────────── GUI window ────────────────────────────────────────
 # Handle closing the application carefully
 def on_closing():
-    global stop_processing, camera, processing_thread, stop_preview_flag, preview_camera_obj, preview_thread
+    global stop_processing, camera, processing_thread
     stop_processing = True
-    stop_preview_flag = True
     print("Process closing")
     
     # Release camera resources
@@ -1101,13 +920,6 @@ def on_closing():
         except Exception as e:
             print(f"Error releasing camera: {e}")
     
-    # Release preview camera
-    if preview_camera_obj:
-        try:
-            preview_camera_obj.release()
-        except Exception as e:
-            print(f"Error releasing preview camera: {e}")
-    
     # Destroy any OpenCV windows
     try:
         cv2.destroyAllWindows()
@@ -1116,17 +928,9 @@ def on_closing():
     
     # Wait for processing thread to finish
     if processing_thread and processing_thread.is_alive():
-        print("Waiting for processing thread to finish...")
         processing_thread.join(timeout=3.0)
         if processing_thread.is_alive():
             print("Warning: Processing thread did not finish in time")
-    
-    # Wait for preview thread to finish
-    if preview_thread and preview_thread.is_alive():
-        print("Waiting for preview thread to finish...")
-        preview_thread.join(timeout=3.0)
-        if preview_thread.is_alive():
-            print("Warning: Preview thread did not finish in time")
     
     # Destroy the root window
     try:

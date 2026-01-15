@@ -1,3 +1,13 @@
+Version 260115.1
+- PC GUI
+    - Added threshold slider.
+
+Version 260109.2
+- PC GUI
+    - Added cut off by 1. half the image if over a certain threshold and 2. trim the bottom
+    - Added camera selection and preview functionality
+    - Remove previous output folder before starting the program.
+
 Version 260104.1
 - PC GUI
     - Added segment everything
