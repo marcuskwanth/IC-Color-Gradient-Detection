@@ -1,3 +1,7 @@
+Version 260528.1
+- PC GUI
+    - Added new decision - "NONE" (based on S_avg and H_avg thresholds)
+
 Version 260115.1
 - PC GUI
     - Added threshold slider.

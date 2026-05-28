@@ -1,5 +1,6 @@
-# Version 260115.1
+# Version 260528.1
 # ──────────────── Libraries Import ───────────────────────────────────
+from multiprocessing.dummy import Process
 import time, threading
 from pathlib import Path
 import shutil
@@ -26,27 +27,14 @@ root.geometry("1400x900")
 SAMPLE_NUM      = 16    # Total number of samples
 N_COLS          = 8     # Number of columns (tubes) per row
 
-# Standardize camera frames to this size before drawing/cropping
-CAM_W, CAM_H = 1280, 720
-
-# Display size
-DISP_W, DISP_H = 800, 500
-
-# How often to run full processing loop (seconds)
-PROCESS_INTERVAL_SEC = 5.0
-
-# Hard-coded Y cleanup (post-SAM)
-Y_CUT_ENABLED      = False
-
-# Always remove mask pixels below this fraction of the *crop* height (0..1)
-Y_CUT_FRAC         = 0.9
-
-# If the mask's bottom-most pixel y is beyond this fraction, trigger the "÷2" rule
-Y_TRIGGER_FRAC     = 0
+CAM_W, CAM_H = 1280, 720    # Standardize camera frames to this size before drawing/cropping
+DISP_W, DISP_H = 800, 500   # Display size
+Y_CUT_ENABLED      = False  # Hard-coded Y cleanup (post-SAM)
+Y_CUT_FRAC         = 0.9    # Always remove mask pixels below this fraction of the *crop* height (0..1)
+Y_TRIGGER_FRAC     = 0      # If the mask's bottom-most pixel y is beyond this fraction, trigger the "÷2" rule
 
 # ──────────────── SAM configuration ─────────────────────────────────
-# Put checkpoint file next to this script (or change the path)
-SAM_CHECKPOINT = Path("program/sam_vit_b_01ec64.pth")
+SAM_CHECKPOINT = Path("program/sam_vit_b_01ec64.pth")   # Put checkpoint file next to this script (or change the path)
 SAM_MODEL_TYPE = "vit_b"  # "vit_h" | "vit_l" | "vit_b"
 SAM_DEVICE     = "cpu"    # "cuda" if you have GPU + torch cuda build
 
@@ -116,7 +104,11 @@ def clip_rect(x1, y1, x2, y2, w, h):
     return x1, y1, x2, y2
 
 
-colour_thres    = 105.8             # Default: 105.8
+colour_threshold_h    = 105.8             # Default: 105.8
+colour_margin_h       = 30.0              # Default: 10.0   (MIN)
+colour_threshold_s    = 10.0              # Default: 10.0   (MIN)
+colour_threshold_v    = 200.0             # Default: 200.0  (MAX)
+
 INFO_PREFIX     = "*INFO: "         # Shown in console
 ERROR_PREFIX    = "*ERROR: "        # Shown in console
 
@@ -126,7 +118,6 @@ erode_pixels        = 0
 padding_ratio       = 0.05
 frame_count         = 0
 processing          = False
-stop_processing     = False
 previewing          = False
 stop_preview_flag   = False
 camera              = None
@@ -137,6 +128,7 @@ results             = []
 output_folder = None
 crops_dir = None
 masks_dir = None
+camera_output = None
 
 def folder_creation():
     global output_folder, crops_dir, masks_dir
@@ -475,7 +467,7 @@ def hard_y_cleanup(mask_bool, cut_frac=Y_CUT_FRAC, trigger_frac=Y_TRIGGER_FRAC):
 # ──────────────── Threading Functions ───────────────────────────────
 def start_processing():
     """Start the processing schedule and its thread upon clicking start processing button"""
-    global processing, stop_processing, camera, processing_thread
+    global processing, camera, processing_thread
 
     if not init_sam_predictor():
         return
@@ -509,24 +501,16 @@ def start_processing():
     if processing:
         return
     processing = True
-    stop_processing = False
 
     status_var.set("Starting the process... Please wait")
 
     process_btn.config(state=tk.DISABLED)
-    stop_btn.config(state=tk.NORMAL)
     export_btn.config(state=tk.DISABLED)
+    export_img_btn.config(state=tk.DISABLED)
 
     processing_thread = threading.Thread(target=main_process)
     processing_thread.daemon = False
     processing_thread.start()
-
-
-def stop_processing_func():
-    """Stop the processing schedule upon clicking stop processing button"""
-    global stop_processing
-    stop_processing = True
-    status_var.set("Stopping the process...")
 
 
 def preview_camera():
@@ -614,21 +598,18 @@ def main_process():
     global processing, results, camera, frame_count
 
     results = []
-    frame_count = 0
-    last_process_time = time.time()
 
-    while not stop_processing and camera and camera.isOpened():
+    if camera and camera.isOpened():
         ret, frame = camera.read()
         if not ret:
             status_var.set("Failed to capture frame from camera")
-            break
+            print("ERROR: Failed to capture frame from camera")
+        else:
+            display_frame = frame.copy()
+            update_camera_display(display_frame)
 
-        display_frame = frame.copy()
-        update_camera_display(display_frame)
-
-        current_time = time.time()
-        if current_time - last_process_time >= PROCESS_INTERVAL_SEC:
             status_var.set(f"Processing: Frame {frame_count+1}")
+            print(f"INFO: Processing frame {frame_count+1}.")
 
             # FIX 5: ensure int/float types are correct
             current_erode = int(float(erode_pixels))
@@ -640,22 +621,20 @@ def main_process():
             update_results_table(result)
             update_hsv_visualization(result)
 
-            last_process_time = current_time
             frame_count += 1
-
-        time.sleep(0.03)
+    else:  
+        status_var.set("Camera is not available")
+        print("ERROR: Camera is not available")
 
     if camera:
         camera.release()
     processing = False
     process_btn.config(state=tk.NORMAL)
-    stop_btn.config(state=tk.DISABLED)
     export_btn.config(state=tk.NORMAL)
+    export_img_btn.config(state=tk.NORMAL)
 
-    if stop_processing:
-        status_var.set("Processing stopped successfully")
-    else:
-        status_var.set("Processing completed successfully")
+    status_var.set(f"Frame {frame_count} completed successfully!")
+    print(f"INFO: Completed processing frame {frame_count}.")
 
 
 def initialize_camera_display():
@@ -804,6 +783,8 @@ def create_dummy_result(sample_type):
 
 def update_camera_display(frame):
     """Update camera display in the GUI (SAM-style ROIs in CAM space)."""
+    global camera_output
+    
     frame_fixed = cv2.resize(frame, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
 
     for i, box in enumerate(TOP_BOXES_CAM, start=1):
@@ -819,6 +800,7 @@ def update_camera_display(frame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     display_frame = cv2.resize(frame_fixed, (DISP_W, DISP_H), interpolation=cv2.INTER_LINEAR)
+    camera_output = display_frame.copy()
 
     rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(rgb_frame)
@@ -829,8 +811,14 @@ def update_camera_display(frame):
 
 
 # ──────────────── HSV Analysis ──────────────────────────────────────
-def color_decision(value):
-    return "RED" if value < colour_thres_var.get() else "PURPLE"
+def color_decision(h_avg, s_avg, v_avg):
+    if s_avg < colour_threshold_s or v_avg > colour_threshold_v:
+        return "NONE"
+
+    if abs(h_avg - colour_threshold_h) <= colour_margin_h:
+        return "NONE"
+
+    return "RED" if h_avg < colour_threshold_h else "PURPLE"
 
 
 def calculate_hsv_stats(rgba_arr, cv2):
@@ -842,7 +830,7 @@ def calculate_hsv_stats(rgba_arr, cv2):
 
     if np.any(mask):
         return {
-            "result": color_decision(h[mask].mean()),
+            "result": color_decision(h[mask].mean(), s[mask].mean(), v[mask].mean()),
             "h_avg": float(h[mask].mean()),
             "h_min": int(h[mask].min()),
             "h_max": int(h[mask].max()),
@@ -871,7 +859,7 @@ def update_results_table(result):
             "",
             tk.END,
             values=(
-                i + 1,
+                f"Top {i + 1}" if i < N_COLS else f"Bottom {i - 7}",
                 sample['result'],
                 f"{sample['h_avg']:.1f}",
                 sample["h_min"],
@@ -883,7 +871,11 @@ def update_results_table(result):
                 sample["v_min"],
                 sample["v_max"]
             ),
-            tags=('red_row' if sample['result'] == "RED" else 'pur_row')
+            tags=(
+                'red_row' if sample['result'] == "RED" 
+                else 'purple_row' if sample['result'] == "PURPLE"
+                else 'none_row'
+            )
         )
 
 
@@ -910,7 +902,9 @@ def update_hsv_visualization(result):
     canvas.draw()
 
 
-def export_results():
+# ──────────────── Result Export ──────────────────────────────────────
+def export_result():
+    """Export the current processing results to a CSV file."""
     if not results:
         messagebox.showwarning("No Results", "No processing results to export")
         return
@@ -920,36 +914,61 @@ def export_results():
         for i, sample in enumerate(result["samples"]):
             data.append(
                 {
-                    "original_image": result["original_path"],
-                    "sample_number": i + 1,
-                    "result": sample['result'],
-                    "h_avg": sample['h_avg'],
-                    "h_min": sample['h_min'],
-                    "h_max": sample['h_max'],
-                    "s_avg": sample['s_avg'],
-                    "s_min": sample['s_min'],
-                    "s_max": sample['s_max'],
-                    "v_avg": sample['v_avg'],
-                    "v_min": sample['v_min'],
-                    "v_max": sample['v_max'],
-                    "sample_path": sample['image_path']
+                    # "original_image": result["original_path"],
+                    "Running count": frame_count,
+                    "Sample No.": f"Top {i + 1}" if i < N_COLS else f"Bottom {i - 7}",
+                    "Result": sample['result'],
+                    "H_avg": sample['h_avg'],
+                    "H_min": sample['h_min'],
+                    "H_max": sample['h_max'],
+                    "S_avg": sample['s_avg'],
+                    "S_min": sample['s_min'],
+                    "S_max": sample['s_max'],
+                    "V_avg": sample['v_avg'],
+                    "V_min": sample['v_min'],
+                    "V_max": sample['v_max'],
+                    "Path": sample['image_path']
                 }
             )
+        data.append({})  # Append empty separation row after each frame's samples
     df = pd.DataFrame(data)
 
     save_path = filedialog.asksaveasfilename(
-        defaultextension=".xlsx",
-        filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+        defaultextension=".csv",
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
     )
 
     if save_path:
-        df.to_excel(save_path, index=False)
+        df.to_csv(save_path, index=False)
         status_var.set(f"Results exported to {Path(save_path).name}")
 
 
+def export_image():
+    """Export the current camera output to a PNG file."""
+    global camera_output
+
+    if not results:
+        messagebox.showwarning("No Results", "No processing results to export")
+        return
+    
+    save_path = filedialog.asksaveasfilename(
+        defaultextension=".png",
+        filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+    )
+
+    if save_path:
+        # Use camera_output from the last processed frame
+        if camera_output is not None:
+            bgr_output = cv2.cvtColor(camera_output, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(save_path, bgr_output)
+            status_var.set(f"Camera image exported to {Path(save_path).name}")
+        else:
+            messagebox.showerror("No Image", "No camera image available to export")
+
+
 # ──────────────── GUI Variables ──────────────────────────────────────
-global orig_label, proc_label, status_var, progress_var, process_btn, stop_btn
-global export_btn, result_tree, camera_label
+global status_var, process_btn
+global export_btn, export_img_btn, result_tree, camera_label
 global preview_btn, stop_preview_btn
 
 # ──────────────── GUI layout ────────────────────────────────────────
@@ -990,11 +1009,11 @@ btn_frame.pack(fill=tk.X, padx=5, pady=10)
 process_btn = ttk.Button(btn_frame, text="Start", command=start_processing)
 process_btn.pack(side=tk.LEFT, padx=5)
 
-stop_btn = ttk.Button(btn_frame, text="Stop", command=stop_processing_func, state=tk.DISABLED)
-stop_btn.pack(side=tk.LEFT, padx=5)
-
-export_btn = ttk.Button(btn_frame, text="Export", command=export_results, state=tk.DISABLED)
+export_btn = ttk.Button(btn_frame, text="Export Result", command=export_result, state=tk.DISABLED)
 export_btn.pack(side=tk.LEFT, padx=5)
+
+export_img_btn = ttk.Button(btn_frame, text="Export Image", command=export_image, state=tk.DISABLED)
+export_img_btn.pack(side=tk.LEFT, padx=5)
 
 status_var = tk.StringVar(value="Ready to process")
 status_label = ttk.Label(btn_frame, textvariable=status_var)
@@ -1013,11 +1032,11 @@ result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 tree_frame = ttk.Frame(result_frame)
 tree_frame.pack(fill=tk.BOTH, expand=True)
 
-columns = ("Sample", "Result", "H_avg", "H_min", "H_max", "S_avg", "S_min", "S_max", "V_avg", "V_min", "V_max")
+columns = ("Sample No.", "Result", "H_avg", "H_min", "H_max", "S_avg", "S_min", "S_max", "V_avg", "V_min", "V_max")
 result_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
 
 column_widths = {
-    "Sample": 60,
+    "Sample No.": 60,
     "Result": 70,
     "H_avg": 70, "H_min": 70, "H_max": 70,
     "S_avg": 70, "S_min": 70, "S_max": 70,
@@ -1030,6 +1049,7 @@ for col in columns:
 
 result_tree.tag_configure('red_row', background="#FFB4B4")
 result_tree.tag_configure('pur_row', background="#E8AEFF")
+result_tree.tag_configure('none_row', background="#D9D9D9")
 
 tree_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=result_tree.yview)
 result_tree.configure(yscroll=tree_scrollbar.set)
@@ -1045,11 +1065,11 @@ threshold_frame.pack(side=tk.LEFT, fill=tk.X, padx=5, pady=(0, 10), expand=True)
 thres_inner_frame = ttk.Frame(threshold_frame)
 thres_inner_frame.pack(fill=tk.X, padx=5, pady=5)
 
-colour_thres_var = tk.DoubleVar(value=colour_thres)
+colour_thres_var = tk.DoubleVar(value=colour_threshold_h)
 ttk.Scale(thres_inner_frame, from_=0, to=180, variable=colour_thres_var,
           command=lambda v: colour_thres_label.config(text=f"{float(v):.1f}"),
           orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-colour_thres_label = ttk.Label(thres_inner_frame, text=f"{colour_thres:.1f}")
+colour_thres_label = ttk.Label(thres_inner_frame, text=f"{colour_threshold_h:.1f}")
 colour_thres_label.pack(side=tk.LEFT, padx=5)
 
 # ---
@@ -1089,8 +1109,7 @@ camera_label.pack(fill=tk.BOTH, expand=True)
 # ──────────────── GUI window ────────────────────────────────────────
 # Handle closing the application carefully
 def on_closing():
-    global stop_processing, camera, processing_thread, stop_preview_flag, preview_camera_obj, preview_thread
-    stop_processing = True
+    global camera, processing_thread, stop_preview_flag, preview_camera_obj, preview_thread
     stop_preview_flag = True
     print("Process closing")
     
