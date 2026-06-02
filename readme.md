@@ -1,6 +1,13 @@
+Version 260601.1
+- PC GUI
+    - Updated export camera output function: No green boxes in the output.
+    - Added a S_Avg slider to set the threshold of NONE or COLOR.
+    - Fixed no purple row color in the result table.
+
 Version 260528.1
 - PC GUI
     - Added new decision - "NONE" (based on S_avg and H_avg thresholds)
+    - Added an option to export camera output.
 
 Version 260115.1
 - PC GUI

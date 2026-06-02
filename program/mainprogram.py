@@ -1,4 +1,4 @@
-# Version 260528.1
+# Version 260601.1
 # ──────────────── Libraries Import ───────────────────────────────────
 from multiprocessing.dummy import Process
 import time, threading
@@ -104,10 +104,10 @@ def clip_rect(x1, y1, x2, y2, w, h):
     return x1, y1, x2, y2
 
 
-colour_threshold_h    = 105.8             # Default: 105.8
-colour_margin_h       = 30.0              # Default: 10.0   (MIN)
-colour_threshold_s    = 10.0              # Default: 10.0   (MIN)
-colour_threshold_v    = 200.0             # Default: 200.0  (MAX)
+colour_threshold_h    = 105.0             # Default: 105.8
+colour_margin_h       = 30.0              # Default: 10.0   (MIN) Not used
+colour_threshold_s    = 20.0              # Default: 20.0   (MIN)
+colour_threshold_v    = 220.0             # Default: 200.0  (MAX)
 
 INFO_PREFIX     = "*INFO: "         # Shown in console
 ERROR_PREFIX    = "*ERROR: "        # Shown in console
@@ -786,6 +786,7 @@ def update_camera_display(frame):
     global camera_output
     
     frame_fixed = cv2.resize(frame, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
+    camera_output = frame_fixed.copy()
 
     for i, box in enumerate(TOP_BOXES_CAM, start=1):
         x0, y0, x1, y1 = box.astype(int)
@@ -800,7 +801,6 @@ def update_camera_display(frame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     display_frame = cv2.resize(frame_fixed, (DISP_W, DISP_H), interpolation=cv2.INTER_LINEAR)
-    camera_output = display_frame.copy()
 
     rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(rgb_frame)
@@ -812,13 +812,13 @@ def update_camera_display(frame):
 
 # ──────────────── HSV Analysis ──────────────────────────────────────
 def color_decision(h_avg, s_avg, v_avg):
-    if s_avg < colour_threshold_s or v_avg > colour_threshold_v:
+    h_thres = float(colour_thres_var.get())
+    s_thres = float(colour_s_thres_var.get())
+
+    if s_avg < s_thres or v_avg > colour_threshold_v:
         return "NONE"
 
-    if abs(h_avg - colour_threshold_h) <= colour_margin_h:
-        return "NONE"
-
-    return "RED" if h_avg < colour_threshold_h else "PURPLE"
+    return "RED" if h_avg < h_thres else "PURPLE"
 
 
 def calculate_hsv_stats(rgba_arr, cv2):
@@ -873,7 +873,7 @@ def update_results_table(result):
             ),
             tags=(
                 'red_row' if sample['result'] == "RED" 
-                else 'purple_row' if sample['result'] == "PURPLE"
+                else 'pur_row' if sample['result'] == "PURPLE"
                 else 'none_row'
             )
         )
@@ -1058,19 +1058,47 @@ result_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
 # ──────────────── RIGHT FRAME: Camera Feed ──────────────────────────
-threshold_frame = ttk.LabelFrame(right_top_frame, text="H_avg Threshold (RED / PURPLE)")
+threshold_frame = ttk.LabelFrame(right_top_frame, text="Thresholds (H_avg / S_avg)")
 threshold_frame.pack(side=tk.LEFT, fill=tk.X, padx=5, pady=(0, 10), expand=True)
 
-# Set the colour threshold scale and label
 thres_inner_frame = ttk.Frame(threshold_frame)
 thres_inner_frame.pack(fill=tk.X, padx=5, pady=5)
 
+# H_avg slider
+h_row = ttk.Frame(thres_inner_frame)
+h_row.pack(fill=tk.X, pady=(0, 6))
+
 colour_thres_var = tk.DoubleVar(value=colour_threshold_h)
-ttk.Scale(thres_inner_frame, from_=0, to=180, variable=colour_thres_var,
-          command=lambda v: colour_thres_label.config(text=f"{float(v):.1f}"),
-          orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-colour_thres_label = ttk.Label(thres_inner_frame, text=f"{colour_threshold_h:.1f}")
-colour_thres_label.pack(side=tk.LEFT, padx=5)
+ttk.Label(h_row, text="H_avg (RED / PURPLE)").pack(side=tk.LEFT, padx=(0, 8))
+
+ttk.Scale(
+    h_row,
+    from_=0, to=180,
+    variable=colour_thres_var,
+    command=lambda v: colour_thres_h_label.config(text=f"{float(v):.1f}"),
+    orient=tk.HORIZONTAL
+).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+colour_thres_h_label = ttk.Label(h_row, text=f"{colour_threshold_h:.1f}")
+colour_thres_h_label.pack(side=tk.LEFT, padx=5)
+
+# S_avg slider
+s_row = ttk.Frame(thres_inner_frame)
+s_row.pack(fill=tk.X)
+
+colour_s_thres_var = tk.DoubleVar(value=colour_threshold_s)
+ttk.Label(s_row, text="S_avg (NONE / COLOR)").pack(side=tk.LEFT, padx=(0, 8))
+
+ttk.Scale(
+    s_row,
+    from_=0, to=255,
+    variable=colour_s_thres_var,
+    command=lambda v: colour_thres_s_label.config(text=f"{float(v):.1f}"),
+    orient=tk.HORIZONTAL
+).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+colour_thres_s_label = ttk.Label(s_row, text=f"{colour_threshold_s:.1f}")
+colour_thres_s_label.pack(side=tk.LEFT, padx=5)
 
 # ---
 cam_menu_frame = ttk.LabelFrame(right_top_frame, text="Camera Selection")
