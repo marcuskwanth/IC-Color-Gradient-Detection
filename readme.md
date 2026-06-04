@@ -1,3 +1,7 @@
+Version 260604.1
+- PC GUI
+    - Added a function to automatically save the H_Avg and S_Avg slider value in a cfg file when changed; Automatically load the cfg file at startup.
+
 Version 260601.1
 - PC GUI
     - Updated export camera output function: No green boxes in the output.

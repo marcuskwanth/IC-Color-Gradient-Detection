@@ -1,4 +1,4 @@
-# Version 260601.1
+# Version 260604.1
 # ──────────────── Libraries Import ───────────────────────────────────
 from multiprocessing.dummy import Process
 import time, threading
@@ -48,8 +48,8 @@ USE_NEGATIVE_POINTS = False     # Keep False for minimal changes / notebook-like
 x_left_frac  = 0.2
 x_right_frac = 0.8
 
-y_top_frac = 0.08   # y-position (as fraction of H) near the liquid of the top row
-y_bot_frac = 0.40   # y-position near the liquid of the bottom row
+y_top_frac = 0.075   # y-position (as fraction of H) near the liquid of the top row
+y_bot_frac = 0.395   # y-position near the liquid of the bottom row
 
 # Box size relative to spacing / image size
 box_w_scale = 0.50   # box width = box_w_scale * tube spacing (dx)
@@ -109,8 +109,52 @@ colour_margin_h       = 30.0              # Default: 10.0   (MIN) Not used
 colour_threshold_s    = 20.0              # Default: 20.0   (MIN)
 colour_threshold_v    = 220.0             # Default: 200.0  (MAX)
 
+CONFIG_FILE     = "config.txt"
 INFO_PREFIX     = "*INFO: "         # Shown in console
 ERROR_PREFIX    = "*ERROR: "        # Shown in console
+
+
+def load_config():
+    """Load saved threshold values from config.txt if it exists."""
+    global colour_threshold_h, colour_threshold_s
+
+    config_path = Path(CONFIG_FILE)
+    if not config_path.exists():
+        return
+
+    try:
+        loaded_values = {}
+        for line in config_path.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            loaded_values[key.strip().lower()] = value.strip()
+
+        if "h_avg" in loaded_values:
+            colour_threshold_h = float(loaded_values["h_avg"])
+        if "s_avg" in loaded_values:
+            colour_threshold_s = float(loaded_values["s_avg"])
+
+        print(f"{INFO_PREFIX}Loaded config from {config_path.resolve()}")
+    except Exception as e:
+        print(f"{ERROR_PREFIX}Failed to load config: {e}")
+
+
+def save_config():
+    """Persist the current threshold values to config.txt."""
+    config_path = Path(CONFIG_FILE)
+
+    try:
+        config_path.write_text(
+            f"H_Avg={colour_threshold_h:.1f}\n"
+            f"S_Avg={colour_threshold_s:.1f}\n",
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"{ERROR_PREFIX}Failed to save config: {e}")
+
+
+load_config()
 
 # ──────────────── Program variables ──────────────────────────────────
 # NOTE: keep name "erode_pixels", but now it truly means pixels (kernel radius)
@@ -786,7 +830,7 @@ def update_camera_display(frame):
     global camera_output
     
     frame_fixed = cv2.resize(frame, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
-    camera_output = frame_fixed.copy()
+    camera_output = frame_fixed.copy() # For export image function
 
     for i, box in enumerate(TOP_BOXES_CAM, start=1):
         x0, y0, x1, y1 = box.astype(int)
@@ -888,9 +932,9 @@ def update_hsv_visualization(result):
     s_avgs = [s["s_avg"] for s in result["samples"]]
     v_avgs = [s["v_avg"] for s in result["samples"]]
 
-    ax.plot(sample_nums, h_avgs, "o-", label="Hue", color="#3BCF00")
-    ax.plot(sample_nums, s_avgs, "o:", label="Saturation", color="#A1A1A1")
-    ax.plot(sample_nums, v_avgs, "o:", label="Value", color="#949494")
+    ax.plot(sample_nums, h_avgs, "o-", label="H (Hue)", color="#3BCF00")
+    ax.plot(sample_nums, s_avgs, "o:", label="S (Saturation)", color="#FB6E6E")
+    ax.plot(sample_nums, v_avgs, "o:", label="V (Value)", color="#949494")
 
     ax.set_title(f"HSV Values of {SAMPLE_NUM} Samples (Current: Frame {frame_count+1})")
     ax.set_xlabel("Sample Number")
@@ -959,8 +1003,7 @@ def export_image():
     if save_path:
         # Use camera_output from the last processed frame
         if camera_output is not None:
-            bgr_output = cv2.cvtColor(camera_output, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(save_path, bgr_output)
+            cv2.imwrite(save_path, camera_output)
             status_var.set(f"Camera image exported to {Path(save_path).name}")
         else:
             messagebox.showerror("No Image", "No camera image available to export")
@@ -1058,7 +1101,7 @@ result_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
 # ──────────────── RIGHT FRAME: Camera Feed ──────────────────────────
-threshold_frame = ttk.LabelFrame(right_top_frame, text="Thresholds (H_avg / S_avg)")
+threshold_frame = ttk.LabelFrame(right_top_frame, text="Thresholds")
 threshold_frame.pack(side=tk.LEFT, fill=tk.X, padx=5, pady=(0, 10), expand=True)
 
 thres_inner_frame = ttk.Frame(threshold_frame)
@@ -1071,11 +1114,18 @@ h_row.pack(fill=tk.X, pady=(0, 6))
 colour_thres_var = tk.DoubleVar(value=colour_threshold_h)
 ttk.Label(h_row, text="H_avg (RED / PURPLE)").pack(side=tk.LEFT, padx=(0, 8))
 
+
+def on_h_threshold_change(value):
+    global colour_threshold_h
+    colour_threshold_h = float(value)
+    colour_thres_h_label.config(text=f"{colour_threshold_h:.1f}")
+    save_config()
+
 ttk.Scale(
     h_row,
     from_=0, to=180,
     variable=colour_thres_var,
-    command=lambda v: colour_thres_h_label.config(text=f"{float(v):.1f}"),
+    command=on_h_threshold_change,
     orient=tk.HORIZONTAL
 ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
@@ -1089,11 +1139,18 @@ s_row.pack(fill=tk.X)
 colour_s_thres_var = tk.DoubleVar(value=colour_threshold_s)
 ttk.Label(s_row, text="S_avg (NONE / COLOR)").pack(side=tk.LEFT, padx=(0, 8))
 
+
+def on_s_threshold_change(value):
+    global colour_threshold_s
+    colour_threshold_s = float(value)
+    colour_thres_s_label.config(text=f"{colour_threshold_s:.1f}")
+    save_config()
+
 ttk.Scale(
     s_row,
     from_=0, to=255,
     variable=colour_s_thres_var,
-    command=lambda v: colour_thres_s_label.config(text=f"{float(v):.1f}"),
+    command=on_s_threshold_change,
     orient=tk.HORIZONTAL
 ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
